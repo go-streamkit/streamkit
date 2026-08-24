@@ -5,8 +5,12 @@ Mutualized, site-agnostic transport code for streaming media, in pure Go.
 `streamkit` gathers three small, self-contained packages that any streaming
 client needs and that carry no knowledge of where their bytes come from: a
 resilient HTTP client, an HLS playlist parser, and an MPEG-DASH manifest reader.
-Each package stands on its own — they share no internal code and, apart from
-`golang.org/x/time/rate` in `httpx`, depend only on the standard library.
+Each package stands on its own — they share no internal code. `hls` and `dash`
+are standard library only; `httpx` adds `golang.org/x/time/rate` for its token
+buckets, and, for the optional browser TLS fingerprints below,
+`golang.org/x/net/http2` and `github.com/refraction-networking/utls`. Every
+dependency is pure Go: the whole module builds with `CGO_ENABLED=0` on all six
+64-bit architectures the CI tests.
 
 ```
 go get github.com/go-streamkit/streamkit
@@ -38,6 +42,27 @@ if err != nil {
 }
 fmt.Println(resp.StatusCode, len(body))
 ```
+
+### Browser TLS fingerprints
+
+A TLS handshake says who is calling before the first header does, and some
+servers close the connection on sight of the ClientHello `crypto/tls` sends —
+whatever the User-Agent would have said, and before any request is written.
+`TLSFingerprint` makes the transport present a named browser's hello instead.
+
+```go
+client, err := httpx.New(httpx.Config{
+    TLSFingerprint: httpx.FingerprintChrome, // or Firefox, Safari, Edge
+})
+```
+
+The zero value keeps Go's own hello, so nothing changes for callers that do not
+ask; a name that is not one is refused by `New` rather than ignored, and
+`httpx.TLSFingerprints()` lists the ones there are. A browser hello offers both
+`h2` and `http/1.1` over ALPN, so the transport dispatches on what the server
+actually chose and speaks it: sending a browser's hello and then always speaking
+HTTP/1.1 would be a second, louder tell. Everything above the handshake — the
+retries, the per-host rate limiting, the `Retry-After` handling — is unchanged.
 
 ## `streamkit/hls`
 
