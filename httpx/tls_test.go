@@ -9,6 +9,7 @@ import (
 	"context"
 	"crypto/tls"
 	"crypto/x509"
+	"encoding/pem"
 	"errors"
 	"fmt"
 	"io"
@@ -320,11 +321,24 @@ func TestTLSFingerprintsIsTheWholeSortedSet(t *testing.T) {
 
 // --- end to end ---------------------------------------------------------
 
-func rootsOf(t *testing.T, srv *httptest.Server) *x509.CertPool {
+// poolOf is the authority pool a config states, which New parses once and hands
+// to the transport it builds.
+func poolOf(t *testing.T, cfg Config) *x509.CertPool {
 	t.Helper()
-	pool := x509.NewCertPool()
-	pool.AddCert(srv.Certificate())
+	pool, err := cfg.roots()
+	if err != nil {
+		t.Fatalf("roots: %v", err)
+	}
 	return pool
+}
+
+// rootsOf is the server's own certificate as PEM, which is how a config states
+// the authorities it trusts: PEM travels, a pool does not.
+func rootsOf(t *testing.T, srv *httptest.Server) []byte {
+	t.Helper()
+	return pem.EncodeToMemory(&pem.Block{
+		Type: "CERTIFICATE", Bytes: srv.Certificate().Raw,
+	})
 }
 
 // TestFingerprintedRequestSpeaksBothProtocols is the other half of the claim:
@@ -347,7 +361,7 @@ func TestFingerprintedRequestSpeaksBothProtocols(t *testing.T) {
 
 			c := newTestClient(t, Config{
 				TLSFingerprint: FingerprintChrome,
-				RootCAs:        rootsOf(t, srv),
+				RootCAsPEM:     rootsOf(t, srv),
 				RateLimit:      -1,
 			})
 			body, resp, err := c.Get(context.Background(), srv.URL, nil)
@@ -394,7 +408,7 @@ func TestFingerprintedRequestStillRetriesAndWaits(t *testing.T) {
 	// in under a second unless the limiter was skipped.
 	c := newTestClient(t, Config{
 		TLSFingerprint: FingerprintFirefox,
-		RootCAs:        rootsOf(t, srv),
+		RootCAsPEM:     rootsOf(t, srv),
 		Retries:        4,
 		Backoff:        time.Millisecond,
 		RateLimit:      2,
@@ -463,7 +477,7 @@ func TestFingerprintedRequestReportsADialThatFails(t *testing.T) {
 func newTestTransport(t *testing.T, cfg Config) *browserTransport {
 	t.Helper()
 	base := http.DefaultTransport.(*http.Transport).Clone()
-	bt, err := newBrowserTransport(cfg, base)
+	bt, err := newBrowserTransport(cfg, poolOf(t, cfg), base)
 	if err != nil {
 		t.Fatalf("newBrowserTransport: %v", err)
 	}
@@ -472,7 +486,7 @@ func newTestTransport(t *testing.T, cfg Config) *browserTransport {
 
 func TestNewBrowserTransportRefusesAnUnknownName(t *testing.T) {
 	base := http.DefaultTransport.(*http.Transport).Clone()
-	if _, err := newBrowserTransport(Config{TLSFingerprint: "lynx"}, base); !errors.Is(err, ErrUnknownFingerprint) {
+	if _, err := newBrowserTransport(Config{TLSFingerprint: "lynx"}, nil, base); !errors.Is(err, ErrUnknownFingerprint) {
 		t.Fatalf("err = %v", err)
 	}
 }
@@ -491,7 +505,7 @@ func TestDialRefusesAConnectionThatSpeaksTheOtherProtocol(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	bt := newTestTransport(t, Config{TLSFingerprint: FingerprintChrome, RootCAs: rootsOf(t, srv)})
+	bt := newTestTransport(t, Config{TLSFingerprint: FingerprintChrome, RootCAsPEM: rootsOf(t, srv)})
 	conn, err := bt.dialFor(protoHTTP1)(context.Background(), "tcp", authorityAddr(u))
 	if err == nil {
 		conn.Close()
@@ -662,7 +676,7 @@ func TestFingerprintedRequestGoesThroughACONNECTProxy(t *testing.T) {
 	proxy := newConnectProxy(t)
 	c := newTestClient(t, Config{
 		TLSFingerprint: FingerprintChrome,
-		RootCAs:        rootsOf(t, srv),
+		RootCAsPEM:     rootsOf(t, srv),
 		RateLimit:      -1,
 		Proxy:          strings.Replace(proxy.url(), "http://", "http://user:secret@", 1),
 		// A deadline on the request is what puts one on the tunnel too.
@@ -701,7 +715,7 @@ func TestTunnelReportsAProxyThatTalksTooEarly(t *testing.T) {
 	srv.StartTLS()
 	defer srv.Close()
 	c := newTestClient(t, Config{TLSFingerprint: FingerprintChrome, RateLimit: -1, Proxy: proxy.url(),
-		RootCAs: rootsOf(t, srv)})
+		RootCAsPEM: rootsOf(t, srv)})
 	_, _, err := c.Get(context.Background(), srv.URL, nil)
 	if err == nil || !strings.Contains(err.Error(), "before the tunnel") {
 		t.Fatalf("err = %v", err)
@@ -788,7 +802,7 @@ func TestRootCAsAreTrustedByTheDefaultTransportToo(t *testing.T) {
 		io.WriteString(w, "trusted")
 	}))
 	defer srv.Close()
-	c := newTestClient(t, Config{RootCAs: rootsOf(t, srv), RateLimit: -1})
+	c := newTestClient(t, Config{RootCAsPEM: rootsOf(t, srv), RateLimit: -1})
 	body, _, err := c.Get(context.Background(), srv.URL, nil)
 	if err != nil {
 		t.Fatalf("Get: %v", err)

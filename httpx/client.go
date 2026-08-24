@@ -59,9 +59,32 @@ type Config struct {
 	// TLSFingerprint type for what changes on the wire, and for what it
 	// means for HTTP/2.
 	TLSFingerprint TLSFingerprint
-	// RootCAs are the certificate authorities to trust instead of the
-	// host's. nil, the usual value, trusts the host's.
-	RootCAs *x509.CertPool
+	// RootCAsPEM are the certificate authorities to trust instead of the
+	// host's, as PEM. Empty, the usual value, trusts the host's.
+	//
+	// PEM rather than an *x509.CertPool, and the reason is a property this
+	// whole struct has to keep: it travels. Callers hand it across process
+	// boundaries to describe one HTTP policy to another program, and a
+	// CertPool cannot be encoded — it has no exported field to encode. A
+	// config carrying one compiles, passes its own tests, and breaks every
+	// caller that sends it anywhere.
+	RootCAsPEM []byte
+}
+
+// ErrRootCAs means the certificate authorities handed over are not readable as
+// PEM, which is worth refusing rather than quietly trusting the host's instead.
+var ErrRootCAs = errors.New("httpx: cannot read the certificate authorities")
+
+// roots is the authority pool this config states, or nil for the host's own.
+func (c Config) roots() (*x509.CertPool, error) {
+	if len(c.RootCAsPEM) == 0 {
+		return nil, nil
+	}
+	pool := x509.NewCertPool()
+	if !pool.AppendCertsFromPEM(c.RootCAsPEM) {
+		return nil, fmt.Errorf("%w: no certificate in what was given", ErrRootCAs)
+	}
+	return pool, nil
 }
 
 // DefaultRateLimit is the page-request budget per host: enough to walk a
@@ -124,12 +147,16 @@ func New(cfg Config) (*Client, error) {
 		}
 		tr.Proxy = http.ProxyURL(pu)
 	}
-	if cfg.RootCAs != nil {
-		tr.TLSClientConfig = &tls.Config{RootCAs: cfg.RootCAs, MinVersion: tls.VersionTLS12}
+	roots, err := cfg.roots()
+	if err != nil {
+		return nil, err
+	}
+	if roots != nil {
+		tr.TLSClientConfig = &tls.Config{RootCAs: roots, MinVersion: tls.VersionTLS12}
 	}
 	var rt http.RoundTripper = tr
 	if cfg.TLSFingerprint != FingerprintDefault {
-		bt, err := newBrowserTransport(cfg, tr)
+		bt, err := newBrowserTransport(cfg, roots, tr)
 		if err != nil {
 			return nil, err
 		}
