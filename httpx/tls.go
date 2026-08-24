@@ -121,6 +121,11 @@ type browserTransport struct {
 	h2         *http2.Transport // https:// URLs that negotiated h2
 	mu         sync.Mutex
 	negotiated map[string]string
+	// connectWait is how long a proxy has to answer CONNECT. It used to be
+	// inherited from a deadline over the whole request, and when that went
+	// so did this: a proxy that accepts the connection and then says
+	// nothing would hold the dial open for ever.
+	connectWait time.Duration
 }
 
 // newBrowserTransport wraps base, the transport Client would otherwise have
@@ -137,12 +142,13 @@ func newBrowserTransport(cfg Config, roots *x509.CertPool, base *http.Transport)
 		return nil, err
 	}
 	t := &browserTransport{
-		hello:      hello,
-		roots:      roots,
-		proxy:      base.Proxy,
-		dialer:     &net.Dialer{Timeout: 30 * time.Second, KeepAlive: 30 * time.Second},
-		plain:      base,
-		negotiated: map[string]string{},
+		hello:       hello,
+		roots:       roots,
+		proxy:       base.Proxy,
+		dialer:      &net.Dialer{Timeout: 30 * time.Second, KeepAlive: 30 * time.Second},
+		connectWait: cfg.Timeout,
+		plain:       base,
+		negotiated:  map[string]string{},
 	}
 	h1 := base.Clone()
 	h1.Proxy = nil
@@ -266,6 +272,11 @@ func (t *browserTransport) dialRaw(ctx context.Context, addr string) (net.Conn, 
 	conn, err := t.dialer.DialContext(ctx, "tcp", proxyAddr(proxy))
 	if err != nil {
 		return nil, fmt.Errorf("httpx: dial proxy %s: %w", proxy.Host, err)
+	}
+	if t.connectWait > 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, t.connectWait)
+		defer cancel()
 	}
 	if err := connectTunnel(ctx, conn, addr, proxy); err != nil {
 		conn.Close()
