@@ -31,6 +31,15 @@ type Config struct {
 	// Cookies are raw "name=value" pairs sent with every request.
 	Cookies []string
 	Proxy   string
+	// Timeout is how long a request may wait for a response to begin, and
+	// how long a transfer may then make no progress at all. It is not a cap
+	// on how long a transfer may take.
+	//
+	// A single deadline over the whole request cannot tell a large file
+	// arriving slowly from a connection that died, since both cross it.
+	// Sixty seconds abandoned a five-hundred megabyte file that would have
+	// finished; half an hour would have let a dead socket hold it for half
+	// an hour. What tells them apart is whether anything is still arriving.
 	Timeout time.Duration
 	Retries int
 	// Backoff is the first retry delay; it doubles on each attempt.
@@ -140,6 +149,9 @@ func New(cfg Config) (*Client, error) {
 	tr := http.DefaultTransport.(*http.Transport).Clone()
 	tr.MaxIdleConnsPerHost = 32
 	tr.ForceAttemptHTTP2 = true
+	// How long to wait for the answer to begin. What follows is watched for
+	// stalling instead, so a slow transfer is left alone.
+	tr.ResponseHeaderTimeout = cfg.Timeout
 	if cfg.Proxy != "" {
 		pu, err := url.Parse(cfg.Proxy)
 		if err != nil {
@@ -163,8 +175,11 @@ func New(cfg Config) (*Client, error) {
 		rt = bt
 	}
 	return &Client{
-		cfg:   cfg,
-		http:  &http.Client{Transport: rt, Timeout: cfg.Timeout},
+		cfg: cfg,
+		// No deadline over the whole request: a transfer that keeps
+		// arriving is never abandoned, and one that stops is cut off by
+		// the guard around its body.
+		http:  &http.Client{Transport: rt},
 		limit: newHostLimiter(cfg),
 	}, nil
 }
@@ -223,9 +238,14 @@ func (c *Client) Do(req *http.Request) (*http.Response, error) {
 		if err := c.limit.wait(ctx, host, bulk); err != nil {
 			return nil, err
 		}
-		resp, err := c.http.Do(req.Clone(ctx))
+		// One cancellation per attempt: the guard around the body owns it
+		// once the response is handed back, and every other path calls it
+		// before moving on.
+		attempt, cancel := context.WithCancel(ctx)
+		resp, err := c.http.Do(req.Clone(attempt))
 		switch {
 		case err != nil:
+			cancel()
 			lastErr = fmt.Errorf("httpx: get %s: %w", req.URL, err)
 			if ctx.Err() != nil {
 				return nil, lastErr
@@ -234,6 +254,7 @@ func (c *Client) Do(req *http.Request) (*http.Response, error) {
 			if d, ok := retryAfter(resp, time.Now()); ok {
 				if d > c.cfg.MaxRetryAfter {
 					resp.Body.Close()
+					cancel()
 					return nil, fmt.Errorf("httpx: %s asks to wait %s, longer than the %s cap: %w",
 						host, d.Round(time.Second), c.cfg.MaxRetryAfter, &StatusError{
 							Code: resp.StatusCode, URL: req.URL.String()})
@@ -241,11 +262,14 @@ func (c *Client) Do(req *http.Request) (*http.Response, error) {
 				delay = d
 			}
 			resp.Body.Close()
+			cancel()
 			lastErr = &StatusError{Code: resp.StatusCode, URL: req.URL.String()}
 		case resp.StatusCode >= 400:
 			resp.Body.Close()
+			cancel()
 			return nil, &StatusError{Code: resp.StatusCode, URL: req.URL.String()}
 		default:
+			resp.Body = guardStall(resp.Body, c.cfg.Timeout, cancel)
 			return resp, nil
 		}
 	}
