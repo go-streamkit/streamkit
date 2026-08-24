@@ -9,6 +9,8 @@ package httpx
 
 import (
 	"context"
+	"crypto/tls"
+	"crypto/x509"
 	"errors"
 	"fmt"
 	"io"
@@ -51,6 +53,15 @@ type Config struct {
 	// MaxRetryAfter caps how long a "Retry-After" answer can hold the
 	// client. 0 means 2 minutes.
 	MaxRetryAfter time.Duration
+	// TLSFingerprint names the browser whose TLS ClientHello the transport
+	// should present. The zero value keeps Go's own hello, which is what
+	// every caller that does not ask for one keeps getting. See the
+	// TLSFingerprint type for what changes on the wire, and for what it
+	// means for HTTP/2.
+	TLSFingerprint TLSFingerprint
+	// RootCAs are the certificate authorities to trust instead of the
+	// host's. nil, the usual value, trusts the host's.
+	RootCAs *x509.CertPool
 }
 
 // DefaultRateLimit is the page-request budget per host: enough to walk a
@@ -113,9 +124,20 @@ func New(cfg Config) (*Client, error) {
 		}
 		tr.Proxy = http.ProxyURL(pu)
 	}
+	if cfg.RootCAs != nil {
+		tr.TLSClientConfig = &tls.Config{RootCAs: cfg.RootCAs, MinVersion: tls.VersionTLS12}
+	}
+	var rt http.RoundTripper = tr
+	if cfg.TLSFingerprint != FingerprintDefault {
+		bt, err := newBrowserTransport(cfg, tr)
+		if err != nil {
+			return nil, err
+		}
+		rt = bt
+	}
 	return &Client{
 		cfg:   cfg,
-		http:  &http.Client{Transport: tr, Timeout: cfg.Timeout},
+		http:  &http.Client{Transport: rt, Timeout: cfg.Timeout},
 		limit: newHostLimiter(cfg),
 	}, nil
 }
