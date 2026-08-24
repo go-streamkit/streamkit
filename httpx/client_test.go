@@ -5,11 +5,14 @@
 package httpx
 
 import (
+	"bytes"
 	"context"
+	"encoding/gob"
 	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"strconv"
 	"strings"
 	"sync/atomic"
@@ -403,4 +406,83 @@ func TestGetStopsWhenTheCallerGivesUp(t *testing.T) {
 			t.Fatal("a body cut short by the caller was accepted")
 		}
 	})
+}
+
+// TestConfigSurvivesTheWire pins a property this struct has to keep: callers
+// hand it across process boundaries to describe one HTTP policy to another
+// program, and gob is what carries it there.
+//
+// It is not a hypothetical. A field of a type gob cannot encode — one with no
+// exported field of its own — compiles, passes every test about what it does,
+// and breaks every caller that sends the config anywhere. This test is what
+// notices, and it fills the struct rather than sampling it, so a field added
+// later is covered by having been set here.
+func TestConfigSurvivesTheWire(t *testing.T) {
+	// A real certificate, because the config that comes back has to still
+	// build a client, and a placeholder would only prove the encoding.
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
+	defer srv.Close()
+	want := Config{
+		UserAgent:      "godl/1",
+		Cookies:        []string{"a=1", "b=2"},
+		Proxy:          "http://proxy.example:3128",
+		Timeout:        30 * time.Second,
+		Retries:        3,
+		Backoff:        time.Second,
+		MaxBodyBytes:   1 << 20,
+		RateLimit:      2.5,
+		Burst:          4,
+		BulkRateLimit:  10,
+		BulkBurst:      2,
+		MaxRetryAfter:  time.Minute,
+		TLSFingerprint: FingerprintChrome,
+		RootCAsPEM:     rootsOf(t, srv),
+	}
+	// Every field is set above, so a field added later and left out here shows
+	// up as a zero on the other side rather than passing unnoticed.
+	if unset := zeroFields(want); len(unset) > 0 {
+		t.Fatalf("this test does not set %s, so it does not cover them", strings.Join(unset, ", "))
+	}
+
+	var buf bytes.Buffer
+	if err := gob.NewEncoder(&buf).Encode(want); err != nil {
+		t.Fatalf("a config cannot be sent: %v", err)
+	}
+	var got Config
+	if err := gob.NewDecoder(&buf).Decode(&got); err != nil {
+		t.Fatalf("a config cannot be read back: %v", err)
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("came back as %+v, want %+v", got, want)
+	}
+	// And what came back still builds a client, which is the point of sending
+	// it in the first place.
+	if _, err := New(got); err != nil {
+		t.Fatalf("the config that crossed cannot be used: %v", err)
+	}
+}
+
+// zeroFields names the fields of a config that are still at their zero value,
+// so a test claiming to fill one can be held to it.
+func zeroFields(c Config) []string {
+	v := reflect.ValueOf(c)
+	var out []string
+	for i := 0; i < v.NumField(); i++ {
+		if v.Field(i).IsZero() {
+			out = append(out, v.Type().Field(i).Name)
+		}
+	}
+	return out
+}
+
+// TestRootCAsThatAreNotCertificatesAreRefused covers the other half of taking
+// authorities as text: text that holds no certificate must be refused, not
+// quietly replaced by the host's own trust.
+func TestRootCAsThatAreNotCertificatesAreRefused(t *testing.T) {
+	for _, fp := range []TLSFingerprint{FingerprintDefault, FingerprintChrome} {
+		_, err := New(Config{RootCAsPEM: []byte("nothing certificate-shaped"), TLSFingerprint: fp})
+		if !errors.Is(err, ErrRootCAs) {
+			t.Fatalf("fingerprint %q: err = %v, want ErrRootCAs", fp, err)
+		}
+	}
 }
