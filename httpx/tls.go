@@ -128,14 +128,17 @@ type browserTransport struct {
 // carries the fingerprinted HTTPS ones, with the proxy moved into the dial
 // because net/http reaches for the proxy address, not the target's, once a
 // custom TLS dialler is in play.
-func newBrowserTransport(cfg Config, base *http.Transport) (*browserTransport, error) {
+// The authority pool is passed in rather than parsed here: New has already read
+// it, and reading the same certificates a second time would be work done twice
+// to reach an error that cannot happen.
+func newBrowserTransport(cfg Config, roots *x509.CertPool, base *http.Transport) (*browserTransport, error) {
 	hello, err := helloIDFor(cfg.TLSFingerprint)
 	if err != nil {
 		return nil, err
 	}
 	t := &browserTransport{
 		hello:      hello,
-		roots:      cfg.RootCAs,
+		roots:      roots,
 		proxy:      base.Proxy,
 		dialer:     &net.Dialer{Timeout: 30 * time.Second, KeepAlive: 30 * time.Second},
 		plain:      base,
