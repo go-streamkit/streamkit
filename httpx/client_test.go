@@ -423,10 +423,14 @@ func TestConfigSurvivesTheWire(t *testing.T) {
 	srv := httptest.NewTLSServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
 	defer srv.Close()
 	want := Config{
-		UserAgent:      "godl/1",
-		Cookies:        []string{"a=1", "b=2"},
-		Proxy:          "http://proxy.example:3128",
-		Timeout:        30 * time.Second,
+		UserAgent: "godl/1",
+		Cookies:   []string{"a=1", "b=2"},
+		Proxy:     "http://proxy.example:3128",
+		Timeout:   30 * time.Second,
+		// Deliberately not the same as Timeout: the two waits are separate
+		// values, and a round trip that swapped them would come back
+		// looking right.
+		StallTimeout:   45 * time.Second,
 		Retries:        3,
 		Backoff:        time.Second,
 		MaxBodyBytes:   1 << 20,

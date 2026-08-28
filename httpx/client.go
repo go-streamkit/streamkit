@@ -31,17 +31,22 @@ type Config struct {
 	// Cookies are raw "name=value" pairs sent with every request.
 	Cookies []string
 	Proxy   string
-	// Timeout is how long a request may wait for a response to begin, and
-	// how long a transfer may then make no progress at all. It is not a cap
-	// on how long a transfer may take.
-	//
-	// A single deadline over the whole request cannot tell a large file
-	// arriving slowly from a connection that died, since both cross it.
-	// Sixty seconds abandoned a five-hundred megabyte file that would have
-	// finished; half an hour would have let a dead socket hold it for half
-	// an hour. What tells them apart is whether anything is still arriving.
+	// Timeout is how long a request may wait for a response to begin. It is
+	// not a cap on how long a transfer may take, and it is not how long a
+	// stopped transfer is tolerated — see StallTimeout.
 	Timeout time.Duration
-	Retries int
+	// StallTimeout is how long a transfer may go with nothing arriving at
+	// all before it is called dead. 0 means the default, sixty seconds.
+	//
+	// It is separate from Timeout because a single deadline over the whole
+	// request cannot tell a large file arriving slowly from a connection
+	// that died, since both cross it. What tells them apart is whether
+	// anything is still arriving — so patience for the total belongs to one
+	// value and patience for silence to another. Bound together, they were
+	// wrong at both ends: a caller wanting to wait half an hour for a big
+	// file thereby waited half an hour on a socket serving nothing.
+	StallTimeout time.Duration
+	Retries      int
 	// Backoff is the first retry delay; it doubles on each attempt.
 	Backoff time.Duration
 	// MaxBodyBytes caps ReadAll-style helpers. 0 means 32 MiB.
@@ -130,6 +135,9 @@ func New(cfg Config) (*Client, error) {
 	}
 	if cfg.Timeout == 0 {
 		cfg.Timeout = 60 * time.Second
+	}
+	if cfg.StallTimeout <= 0 {
+		cfg.StallTimeout = 60 * time.Second
 	}
 	if cfg.Retries < 0 {
 		cfg.Retries = 0
@@ -269,7 +277,7 @@ func (c *Client) Do(req *http.Request) (*http.Response, error) {
 			cancel()
 			return nil, &StatusError{Code: resp.StatusCode, URL: req.URL.String()}
 		default:
-			resp.Body = guardStall(resp.Body, c.cfg.Timeout, cancel)
+			resp.Body = guardStall(resp.Body, c.cfg.StallTimeout, cancel)
 			return resp, nil
 		}
 	}

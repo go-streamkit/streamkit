@@ -39,7 +39,7 @@ func TestASlowTransferIsNotAStalledOne(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	c := newTestClient(t, Config{Timeout: window, Retries: 0, RateLimit: -1})
+	c := newTestClient(t, Config{StallTimeout: window, Retries: 0, RateLimit: -1})
 	req, err := c.NewRequest(context.Background(), srv.URL, nil)
 	if err != nil {
 		t.Fatal(err)
@@ -80,7 +80,7 @@ func TestATransferThatStopsIsCutOff(t *testing.T) {
 	defer srv.Close()
 	defer close(release)
 
-	c := newTestClient(t, Config{Timeout: window, Retries: 0, RateLimit: -1})
+	c := newTestClient(t, Config{StallTimeout: window, Retries: 0, RateLimit: -1})
 	req, err := c.NewRequest(context.Background(), srv.URL, nil)
 	if err != nil {
 		t.Fatal(err)
@@ -181,5 +181,63 @@ func TestASilentProxyIsNotWaitedOnForEver(t *testing.T) {
 	}
 	if took := time.Since(started); took > 10*window {
 		t.Fatalf("the silent proxy held the dial for %s, want about one window", took)
+	}
+}
+
+// TestPatienceForSilenceIsNotPatienceForTheWhole covers the two waits being
+// separate values.
+//
+// Bound together, they were wrong at both ends. A downloader asking to wait
+// half an hour for a large file thereby agreed to wait half an hour on a
+// socket serving nothing: a transfer here sat with an established connection
+// and not one byte for minutes, and would have held its place for thirty.
+// Wanting to wait a long time for a big file says nothing about how long
+// silence should be tolerated.
+func TestPatienceForSilenceIsNotPatienceForTheWhole(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Length", "1000")
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte("x"))
+		w.(http.Flusher).Flush()
+		// Then nothing, for far longer than the silence allowed and far
+		// less than the patience for the whole.
+		time.Sleep(30 * window)
+	}))
+	defer srv.Close()
+
+	c := newTestClient(t, Config{
+		Timeout: time.Hour, StallTimeout: window, Retries: 0, RateLimit: -1,
+	})
+	req, err := c.NewRequest(context.Background(), srv.URL, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp, err := c.Do(req)
+	if err != nil {
+		t.Fatalf("Do: %v", err)
+	}
+	defer resp.Body.Close()
+	started := time.Now()
+	if _, err := io.ReadAll(resp.Body); err == nil {
+		t.Fatal("a body that stopped arriving was read to the end")
+	}
+	// Noticed within two windows, as the guard samples rather than measures.
+	// What matters is that the hour played no part.
+	if waited := time.Since(started); waited > 10*window {
+		t.Errorf("silence was tolerated for %s, which is the patience for the whole, not for silence", waited)
+	}
+}
+
+// TestSilenceIsNotToleratedForEverByDefault covers the caller who sets no
+// window at all. A field left at zero must not mean "wait for ever", which is
+// what reusing the total would amount to for a caller who asked for a long
+// one.
+func TestSilenceIsNotToleratedForEverByDefault(t *testing.T) {
+	c := newTestClient(t, Config{Timeout: time.Hour, Retries: 0, RateLimit: -1})
+	if c.cfg.StallTimeout != 60*time.Second {
+		t.Errorf("StallTimeout = %s, want the sixty-second default", c.cfg.StallTimeout)
+	}
+	if c.cfg.Timeout != time.Hour {
+		t.Errorf("Timeout = %s, want the hour that was asked for", c.cfg.Timeout)
 	}
 }
