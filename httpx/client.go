@@ -14,6 +14,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"strings"
@@ -107,9 +108,10 @@ const DefaultRateLimit = 4
 
 // Client is a retrying, rate-limited HTTP client.
 type Client struct {
-	cfg   Config
-	http  *http.Client
-	limit *hostLimiter
+	cfg     Config
+	http    *http.Client
+	limit   *hostLimiter
+	traffic *traffic
 }
 
 // ErrHTTPStatus reports a non-2xx response.
@@ -174,6 +176,14 @@ func New(cfg Config) (*Client, error) {
 	if roots != nil {
 		tr.TLSClientConfig = &tls.Config{RootCAs: roots, MinVersion: tls.VersionTLS12}
 	}
+	// Measured at the connection, before anything wraps it: see traffic.
+	tf := &traffic{}
+	if tr.DialContext != nil {
+		tr.DialContext = tf.count(tr.DialContext)
+	} else {
+		d := &net.Dialer{Timeout: 30 * time.Second, KeepAlive: 30 * time.Second}
+		tr.DialContext = tf.count(d.DialContext)
+	}
 	var rt http.RoundTripper = tr
 	if cfg.TLSFingerprint != FingerprintDefault {
 		bt, err := newBrowserTransport(cfg, roots, tr)
@@ -187,8 +197,9 @@ func New(cfg Config) (*Client, error) {
 		// No deadline over the whole request: a transfer that keeps
 		// arriving is never abandoned, and one that stops is cut off by
 		// the guard around its body.
-		http:  &http.Client{Transport: rt},
-		limit: newHostLimiter(cfg),
+		http:    &http.Client{Transport: rt},
+		limit:   newHostLimiter(cfg),
+		traffic: tf,
 	}, nil
 }
 
