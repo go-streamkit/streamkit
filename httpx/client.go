@@ -107,9 +107,10 @@ const DefaultRateLimit = 4
 
 // Client is a retrying, rate-limited HTTP client.
 type Client struct {
-	cfg   Config
-	http  *http.Client
-	limit *hostLimiter
+	cfg     Config
+	http    *http.Client
+	limit   *hostLimiter
+	traffic *traffic
 }
 
 // ErrHTTPStatus reports a non-2xx response.
@@ -174,6 +175,12 @@ func New(cfg Config) (*Client, error) {
 	if roots != nil {
 		tr.TLSClientConfig = &tls.Config{RootCAs: roots, MinVersion: tls.VersionTLS12}
 	}
+	// Measured at the connection, before anything wraps it: see traffic. The
+	// dialer is never nil here -- it comes from http.DefaultTransport, which
+	// sets one -- and a branch for the case it might be would be a statement
+	// no test can reach.
+	tf := &traffic{}
+	tr.DialContext = tf.count(tr.DialContext)
 	var rt http.RoundTripper = tr
 	if cfg.TLSFingerprint != FingerprintDefault {
 		bt, err := newBrowserTransport(cfg, roots, tr)
@@ -187,8 +194,9 @@ func New(cfg Config) (*Client, error) {
 		// No deadline over the whole request: a transfer that keeps
 		// arriving is never abandoned, and one that stops is cut off by
 		// the guard around its body.
-		http:  &http.Client{Transport: rt},
-		limit: newHostLimiter(cfg),
+		http:    &http.Client{Transport: rt},
+		limit:   newHostLimiter(cfg),
+		traffic: tf,
 	}, nil
 }
 
