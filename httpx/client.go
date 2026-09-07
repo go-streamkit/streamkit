@@ -14,7 +14,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"net"
 	"net/http"
 	"net/url"
 	"strings"
@@ -176,14 +175,12 @@ func New(cfg Config) (*Client, error) {
 	if roots != nil {
 		tr.TLSClientConfig = &tls.Config{RootCAs: roots, MinVersion: tls.VersionTLS12}
 	}
-	// Measured at the connection, before anything wraps it: see traffic.
+	// Measured at the connection, before anything wraps it: see traffic. The
+	// dialer is never nil here -- it comes from http.DefaultTransport, which
+	// sets one -- and a branch for the case it might be would be a statement
+	// no test can reach.
 	tf := &traffic{}
-	if tr.DialContext != nil {
-		tr.DialContext = tf.count(tr.DialContext)
-	} else {
-		d := &net.Dialer{Timeout: 30 * time.Second, KeepAlive: 30 * time.Second}
-		tr.DialContext = tf.count(d.DialContext)
-	}
+	tr.DialContext = tf.count(tr.DialContext)
 	var rt http.RoundTripper = tr
 	if cfg.TLSFingerprint != FingerprintDefault {
 		bt, err := newBrowserTransport(cfg, roots, tr)
