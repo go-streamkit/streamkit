@@ -52,6 +52,10 @@ type MediaPlaylist struct {
 	// access point (EXT-X-INDEPENDENT-SEGMENTS), which is so for video segments
 	// cut at keyframes.
 	IndependentSegments bool
+	// Keys state the encryption of every segment and of the initialisation
+	// segment: one EXT-X-KEY per entry, before the map. Only fMP4 (InitURI set)
+	// is encrypted by this package; WebVTT is not.
+	Keys []EncryptionKey
 }
 
 func fail(format string, args ...any) error {
@@ -69,6 +73,13 @@ func fail(format string, args ...any) error {
 func (m MediaPlaylist) Write(w io.Writer) error {
 	if len(m.Segments) == 0 || len(m.Segments) > MaxWritten {
 		return fail("%d segments, want 1 to %d", len(m.Segments), MaxWritten)
+	}
+	keys, err := keyTags(m.Keys)
+	if err != nil {
+		return err
+	}
+	if len(keys) > 0 && m.InitURI == "" {
+		return fail("keys on a playlist without an initialisation segment: only fMP4 is encrypted")
 	}
 	p, _ := m3u8.NewMediaPlaylist(0, uint(len(m.Segments))) // only an error when the window exceeds the capacity
 	p.SetWritePrecision(6)
@@ -93,12 +104,15 @@ func (m MediaPlaylist) Write(w io.Writer) error {
 		p.SetDefaultMap(uri, 0, 0)
 		version = 7
 	}
+	for _, k := range keys {
+		_ = p.SetDefaultKey(k.Method, k.URI, k.IV, k.Keyformat, k.Keyformatversions) // never fails
+	}
 	p.SetVersion(version)
 	p.SetTargetDuration(uint(max(math.Round(longest), 1)))
 	p.MediaType = m3u8.VOD
 	p.SetIndependentSegments(m.IndependentSegments)
 	p.Close()
-	_, err := w.Write(p.Encode().Bytes())
+	_, err = w.Write(p.Encode().Bytes())
 	return err
 }
 
@@ -148,6 +162,10 @@ type MasterPlaylist struct {
 	// IndependentSegments states EXT-X-INDEPENDENT-SEGMENTS for every
 	// segment of every playlist (Apple's HLS Authoring Specification 9.11).
 	IndependentSegments bool
+	// SessionKeys are EXT-X-SESSION-KEY tags (draft-pantos-hls-rfc8216bis
+	// 4.4.6.5), which let a player preload the keys of the media playlists; each
+	// must match the EXT-X-KEY of the playlists that use the same URI.
+	SessionKeys []EncryptionKey
 }
 
 // Write writes the master playlist. Every URI is checked as MediaPlaylist.Write
@@ -171,7 +189,15 @@ func (m MasterPlaylist) Write(w io.Writer) error {
 		groups[r.GroupID] = r.Type
 		alts = append(alts, alt)
 	}
+	session, err := keyTags(m.SessionKeys)
+	if err != nil {
+		return fmt.Errorf("session keys: %w", err)
+	}
 	p := m3u8.NewMasterPlaylist()
+	for _, k := range session {
+		k := k
+		p.SessionKeys = append(p.SessionKeys, &k)
+	}
 	p.SetWritePrecision(3)
 	p.SetVersion(7)
 	p.SetIndependentSegments(m.IndependentSegments)
@@ -185,7 +211,7 @@ func (m MasterPlaylist) Write(w io.Writer) error {
 		}
 		p.Append(uri, nil, params)
 	}
-	_, err := w.Write(p.Encode().Bytes())
+	_, err = w.Write(p.Encode().Bytes())
 	return err
 }
 

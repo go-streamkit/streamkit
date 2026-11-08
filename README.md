@@ -114,6 +114,16 @@ same set of lines for media playlists, the same attributes for the master;
 ffmpeg's golden output is in `testdata/ffmpeg`. The segments themselves come from
 go-avkit's `container.Segment`.
 
+Encryption is stated, never performed: `MediaPlaylist.Keys` and
+`MasterPlaylist.SessionKeys` are lists of `hls.EncryptionKey` (`EXT-X-KEY` and
+`EXT-X-SESSION-KEY`: method `AES-128`, `SAMPLE-AES` (fMP4 `cbcs`) or
+`SAMPLE-AES-CTR` (fMP4 `cenc`), the key's URI, optional IV, `KEYFORMAT` and
+`KEYFORMATVERSIONS`; draft-pantos-hls-rfc8216bis §4.4.4.4 and §4.4.6.5). The URI
+may have any scheme (`skd://`, `data:`, `https://`); quotes and control characters
+are refused, `SAMPLE-AES-CTR` takes no IV, and keys on a WebVTT playlist are
+refused. The `AES-128` tag equals ffmpeg's (`-hls_key_info_file`); ffmpeg cannot
+encrypt fMP4 HLS, so the sample-encryption tags rest on the draft's text.
+
 ## `streamkit/dash`
 
 An MPEG-DASH manifest reader that understands `SegmentTemplate` (with
@@ -146,8 +156,12 @@ reads back through `dash.Parse`. Compared with ffmpeg's `dash` muxer: the same
 profile, type, durations, content types, codecs, bandwidth, timescales,
 templates and timeline entries; ffmpeg puts `frameRate` on the adaptation set,
 this on the representation. ISO/IEC 23009-1 is paywalled and was not opened; the
-`dash-mpd` types follow its schema. Live, multi-bitrate ladders and encryption
-are not covered.
+`dash-mpd` types follow its schema. Live and multi-bitrate ladders are not
+covered. `AdaptationSet.ContentProtection` states encryption: the
+`urn:mpeg:dash:mp4protection:2011` element (value `cenc` or `cbcs`, with
+`cenc:default_KID`) and one element per DRM system with its `cenc:pssh` (base64);
+the shape is that of the manifests in `dash-mpd`'s testdata, as ffmpeg's muxer
+writes none.
 
 ## License
 

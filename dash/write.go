@@ -4,6 +4,7 @@
 package dash
 
 import (
+	"encoding/base64"
 	"errors"
 	"fmt"
 	"io"
@@ -112,6 +113,81 @@ type AdaptationSet struct {
 	// Lang is an RFC 5646 tag, or empty.
 	Lang            string
 	Representations []Representation
+	// ContentProtection states the encryption of the adaptation set: normally
+	// one MP4Protection entry and one per DRM system.
+	ContentProtection []ContentProtection
+}
+
+// MP4ProtectionScheme is the schemeIdUri of the ContentProtection element that
+// states the Common Encryption scheme and default key identifier of ISO BMFF
+// segments (ISO/IEC 23001-7, the ContentProtection of "mp4protection").
+const MP4ProtectionScheme = "urn:mpeg:dash:mp4protection:2011"
+
+// MaxProtections is the most ContentProtection elements of an adaptation set,
+// and MaxPSSH the longest pssh box (bytes) one may carry.
+const (
+	MaxProtections = 32
+	MaxPSSH        = 1 << 20
+)
+
+// ContentProtection is one ContentProtection element.
+//
+// Sources: ISO/IEC 23009-1 5.8.4.1 and ISO/IEC 23001-7 (paywalled, not opened);
+// the element's shape is read from the dash-mpd types and its real manifests
+// (HbbTV, DASH-IF livesim): <ContentProtection schemeIdUri="urn:mpeg:dash:
+// mp4protection:2011" value="cenc" cenc:default_KID="..."/> and, per DRM system,
+// <ContentProtection schemeIdUri="urn:uuid:..."><cenc:pssh>base64</cenc:pssh>.
+type ContentProtection struct {
+	// SchemeIDURI is MP4ProtectionScheme, or "urn:uuid:" and the DRM system's ID.
+	SchemeIDURI string
+	// Value is "cenc" or "cbcs" for MP4ProtectionScheme, a system's own string
+	// ("widevine") otherwise, or empty.
+	Value string
+	// DefaultKID is the key identifier as a UUID, "11223344-5566-7788-9900-aabbccddeeff"
+	// (cenc:default_KID); required for MP4ProtectionScheme.
+	DefaultKID string
+	// PSSH is a complete pssh box (cenc:pssh, written in base64), or nil.
+	PSSH []byte
+}
+
+// check refuses a malformed element.
+func (c ContentProtection) check() error {
+	if err := safe.Quoted("schemeIdUri", c.SchemeIDURI); err != nil {
+		return err
+	}
+	if c.Value != "" {
+		if err := safe.Quoted("value", c.Value); err != nil {
+			return err
+		}
+	}
+	if len(c.PSSH) > MaxPSSH {
+		return fail("a pssh box of %d bytes, at most %d", len(c.PSSH), MaxPSSH)
+	}
+	if c.DefaultKID != "" && !isUUID(c.DefaultKID) {
+		return fail("default_KID %q is not a UUID", c.DefaultKID)
+	}
+	if c.SchemeIDURI == MP4ProtectionScheme && ((c.Value != "cenc" && c.Value != "cbcs") || c.DefaultKID == "") {
+		return fail("%s needs the value cenc or cbcs and a default_KID", MP4ProtectionScheme)
+	}
+	return nil
+}
+
+// isUUID reports whether s is 8-4-4-4-12 hexadecimal digits.
+func isUUID(s string) bool {
+	if len(s) != 36 {
+		return false
+	}
+	for i, c := range s {
+		switch {
+		case i == 8 || i == 13 || i == 18 || i == 23:
+			if c != '-' {
+				return false
+			}
+		case !(c >= '0' && c <= '9' || c >= 'a' && c <= 'f' || c >= 'A' && c <= 'F'):
+			return false
+		}
+	}
+	return true
 }
 
 // Presentation is a static MPD to write.
@@ -186,7 +262,21 @@ func buildAdaptationSet(id uint32, a AdaptationSet, ids map[string]bool) (*empd.
 	if len(a.Representations) == 0 {
 		return nil, 0, fail("no representation")
 	}
+	if len(a.ContentProtection) > MaxProtections {
+		return nil, 0, fail("%d ContentProtection elements, at most %d", len(a.ContentProtection), MaxProtections)
+	}
 	set := empd.NewAdaptationSetWithParams(a.ContentType, a.MimeType, true, 1)
+	for i, c := range a.ContentProtection {
+		if err := c.check(); err != nil {
+			return nil, 0, fmt.Errorf("ContentProtection %d: %w", i+1, err)
+		}
+		cp := empd.NewContentProtection()
+		cp.SchemeIdUri, cp.Value, cp.DefaultKID = empd.AnyURI(c.SchemeIDURI), c.Value, c.DefaultKID
+		if len(c.PSSH) > 0 {
+			cp.Pssh = &empd.PsshType{Value: base64.StdEncoding.EncodeToString(c.PSSH)}
+		}
+		set.ContentProtections = append(set.ContentProtections, cp)
+	}
 	set.Id = empd.Ptr(id)
 	set.Lang = a.Lang
 	var references int

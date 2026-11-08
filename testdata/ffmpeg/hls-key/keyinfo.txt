@@ -1,0 +1,3 @@
+https://keys.example/key.bin
+key.bin
+00112233445566778899aabbccddeeff
