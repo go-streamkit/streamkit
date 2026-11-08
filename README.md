@@ -4,9 +4,13 @@ Mutualized, site-agnostic transport code for streaming media, in pure Go.
 
 `streamkit` gathers three small, self-contained packages that any streaming
 client needs and that carry no knowledge of where their bytes come from: a
-resilient HTTP client, an HLS playlist parser, and an MPEG-DASH manifest reader.
-Each package stands on its own — they share no internal code. `hls` and `dash`
-are standard library only; `httpx` adds `golang.org/x/time/rate` for its token
+resilient HTTP client, an HLS playlist parser and writer, and an MPEG-DASH
+manifest reader and writer.
+Each package stands on its own — they share no code beyond the small
+`internal/safe` validator the two writers use. The `hls` and `dash` parsers are
+standard library only; their writers wrap `github.com/Eyevinn/hls-m3u8` and
+`github.com/Eyevinn/dash-mpd` (MIT), which the packages therefore import.
+`httpx` adds `golang.org/x/time/rate` for its token
 buckets, and, for the optional browser TLS fingerprints below,
 `golang.org/x/net/http2` and `github.com/refraction-networking/utls`. Every
 dependency is pure Go: the whole module builds with `CGO_ENABLED=0` on all six
@@ -85,6 +89,31 @@ if pl.Master {
 }
 ```
 
+### Writing playlists
+
+`hls.MediaPlaylist` and `hls.MasterPlaylist` write a VOD packaging of CMAF/fMP4
+(or WebVTT) segments, wrapping Eyevinn's `hls-m3u8` for the tags:
+
+```go
+err := hls.MediaPlaylist{
+    InitURI: "video1_init.mp4", IndependentSegments: true,
+    Segments: []hls.MediaSegment{{URI: "video1_00001.m4s", Duration: 2}, {URI: "video1_00002.m4s", Duration: 2}},
+}.Write(w)
+```
+
+`EXT-X-TARGETDURATION` is the longest segment rounded to the nearest integer
+(RFC 8216 §4.3.3.1), the version is 7 with an `EXT-X-MAP` (which needs 6) and 3
+without, and `MasterPlaylist` writes `EXT-X-MEDIA` renditions (`AUDIO`,
+`SUBTITLES`) and `EXT-X-STREAM-INF` variants, refusing a variant that names a
+group that is not defined. Every URI must be a relative reference that stays in
+the playlist's directory (no absolute path, scheme, backslash, `.` or `..`
+segment; the rest is percent-escaped), and a name, language or codec that holds
+a quote or a line break is refused, so a track name cannot start a new tag.
+Output was compared with ffmpeg's `hls` muxer (`-hls_segment_type fmp4`): the
+same set of lines for media playlists, the same attributes for the master;
+ffmpeg's golden output is in `testdata/ffmpeg`. The segments themselves come from
+go-avkit's `container.Segment`.
+
 ## `streamkit/dash`
 
 An MPEG-DASH manifest reader that understands `SegmentTemplate` (with
@@ -103,6 +132,22 @@ for _, s := range m.Video() {
         s.Codecs, s.Width, s.Height, len(s.Segments), m.NeedsMuxing(s))
 }
 ```
+
+### Writing a manifest
+
+`dash.Presentation` writes a static MPD (`isoff-live` profile) of one period:
+one adaptation set per kind, flagged `segmentAlignment` and `startWithSAP`, each
+representation with a `SegmentTemplate` and a `SegmentTimeline`, wrapping
+Eyevinn's `dash-mpd`. `dash.Timeline` turns segment spans into `S` entries with
+repeat counts, stating `t` only where there is a gap. Templates are checked
+(`$Number$`, `$Time$`, `$RepresentationID$`, `$Bandwidth$`, `$$`; no
+traversal) and identifiers are letters, digits, `_` and `-`. A written manifest
+reads back through `dash.Parse`. Compared with ffmpeg's `dash` muxer: the same
+profile, type, durations, content types, codecs, bandwidth, timescales,
+templates and timeline entries; ffmpeg puts `frameRate` on the adaptation set,
+this on the representation. ISO/IEC 23009-1 is paywalled and was not opened; the
+`dash-mpd` types follow its schema. Live, multi-bitrate ladders and encryption
+are not covered.
 
 ## License
 

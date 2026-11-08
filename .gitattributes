@@ -1,0 +1,3 @@
+# ffmpeg's output is the oracle byte for byte; a checkout must not rewrite its
+# line endings.
+testdata/ffmpeg/** -text
